@@ -13,6 +13,7 @@ import seaborn as sns
 from astropy import units as u
 from fastcore.utils import dict2obj
 
+
 import holoviews as hv
 import hvplot.xarray
 import pandas as pd
@@ -54,7 +55,10 @@ class PDSReader:
             label.QUBE.UL_CORNER_BAND,
             label.QUBE.LR_CORNER_BAND + 1,  # for numpy slicing + 1
         ]
-        self.band_range[1] = 1024 // label.QUBE.BAND_BIN
+        try:
+            self.band_range[1] = 1024 // label.QUBE.BAND_BIN
+        except TypeError:
+            raise ValueError("Unsupported data object. See https://github.com/Cassini-UVIS/pyuvis/issues/10")
 
         self.line_range = [
             label.QUBE.UL_CORNER_LINE,
@@ -102,7 +106,7 @@ class UVPDS:
         # The attribute `pid` will carry the shortenend PDS identifier,
         # attribute `uvis_id` will just store what the user came in with.
         uvis_id: str,
-        skip_download: bool=False
+        skip_download: bool = False,
     ):
         self.uvis_id = uvis_id
         self.product_id = self.pid = uvis_id[:17]
@@ -136,11 +140,13 @@ class UVPDS:
 
     @property
     def cal_label_path(self):
-        return self.path.parent / (self.file_id + "_CAL_3.LBL")
+        p = self.path.parent
+        return max(list(p.glob(f"{self.file_id}_CAL_?.LBL")))
 
     @property
     def cal_data_path(self):
-        return self.path.parent / (self.file_id + "_CAL_3.DAT")
+        p = self.path.parent
+        return max(list(p.glob(f"{self.file_id}_CAL_?.DAT")))
 
     @property
     def n_bands(self):
@@ -185,9 +191,9 @@ class UVPDS:
         arr.attrs["long_name"] = f"{self.detector} raw data"
         arr.spectral.attrs["units"] = "nm"
         arr.spectral.attrs["long_name"] = "Wavelength"
-        arr.spectral.attrs["axis"] = 'x'
+        arr.spectral.attrs["axis"] = "x"
         arr.spatial.attrs["long_name"] = "Spatial lines"
-        arr.spatial.attrs["axis"] = 'y'
+        arr.spatial.attrs["axis"] = "y"
         arr.attrs["n_bands"] = self.n_bands
         arr.attrs["integration_duration"] = self.integration_duration
         arr.name = self.product_id
@@ -202,9 +208,7 @@ class UVPDS:
         "Following the instructions in self.caliblabel.QUBE.DESCRIPTION"
         caldata = self.cal_data.data
         caldata[caldata == -1] = np.nan
-        calibrated = (
-            self.data * caldata * self.caliblabel.QUBE.CORE_MULTIPLIER
-        )
+        calibrated = self.data * caldata * self.caliblabel.QUBE.CORE_MULTIPLIER
         arr = self.create_xarray(calibrated)
         arr.attrs["units"] = "kiloRayleighs"
         arr.attrs["long_name"] = f"{self.detector} calibrated data"
@@ -212,18 +216,18 @@ class UVPDS:
 
     @property
     def default_wave_min(self):
-        if self.pid.startswith("EUV"):
+        if self.pid.startswith("FUV"):
             return 111.5 * u.nm
-        elif self.pid.startswith("FUV"):
+        elif self.pid.startswith("EUV"):
             return 56.12 * u.nm
         else:
             raise NotImplementedError(pid)
 
     @property
     def default_wave_max(self):
-        if self.pid.startswith("EUV"):
+        if self.pid.startswith("FUV"):
             return 190.0 * u.nm
-        elif self.pid.startswith("FUV"):
+        elif self.pid.startswith("EUV"):
             return 118.1 * u.nm
         else:
             raise NotImplementedError(self.PRODUCT_ID)
@@ -247,7 +251,7 @@ class UVPDS:
             binned_wavelengths = np.zeros((self.n_bands,), dtype=np.double)
             for iwave in range(0, wavelengths.size, BAND_BIN):
                 binned_wavelengths[iwave // BAND_BIN] = np.mean(
-                    wavelengths[iwave : iwave + BAND_BIN]
+                    wavelengths[iwave:iwave+BAND_BIN]
                 )
             wavelengths = binned_wavelengths / 10.0  # Convert from Angstroms to nm
         else:
@@ -272,7 +276,7 @@ class UVPDS:
         ),  # percentiles to be applied as minimum/maximum stretch
         clim: tuple = None,  # Set the visual stretch manually instead of via percentiles
         cmap: str = "viridis",  # default colormap. Other nice ones are 'plasma' or 'magma'
-        calibrated = False,  # switch to control if to plot raw or calibrated data
+        calibrated=False,  # switch to control if to plot raw or calibrated data
     ):
         """Create default hvplot for the data.
 
@@ -284,20 +288,33 @@ class UVPDS:
         So I leave it to the user to switch to the raster plot using the `precise` switch."""
         data = self.xarray if not calibrated else self.calibrated
         # define good stretch by using percentiles:
-        stretch = (
-            tuple(np.percentile(data, percentiles)) if clim is None else clim
-        )
+        stretch = tuple(np.percentile(data, percentiles)) if clim is None else clim
         # use `frameswise=False` to allow zooming in survice scrolling over samples
         kwargs = dict(
+            x='spectral',
+            y='spatial',
             framewise=False,
             cmap=cmap,
             clim=stretch,
-            clabel=data.attrs['units'],
-            title=data.attrs['long_name'],
+            clabel=data.attrs["units"],
+            title=data.attrs["long_name"],
         )
         if precise:
             kwargs["kind"] = "quadmesh"
-        return data.hvplot(**kwargs).opts(gridstyle={"grid_line_color": "white"}).opts(axiswise=True)
+        return (
+            data.hvplot(**kwargs)
+            .opts(gridstyle={"grid_line_color": "white"})
+            .opts(axiswise=True)
+        )
+
+    def __str__(self):
+        s = f"UVIS ID: {self.uvis_id}\n"
+        s += f"PDS Product ID: {self.product_id}\n"
+        s += f"Path: {self.path}\n"
+        return s
+
+    def __repr__(self):
+        return self.__str__()
 
 # Cell
 class UVISObs:
